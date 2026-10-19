@@ -1,0 +1,51 @@
+{
+  "model": "SlideOn",
+  "stage": "retrieval",
+  "parameters": {
+    "sae": "lightonai/SlideOn-SAE",
+    "sae_revision": "9372da2e84fb87035514469d00982ca7f13ef4d1",
+    "backbone_revision": "cb9947ebccb33862d24e3c7ca2edb25e51acd887",
+    "learning_rate": 4e-05,
+    "epochs": 1,
+    "max_steps": 24544,
+    "global_batch_size": 128,
+    "batch_size": 4,
+    "gradient_accumulation": null,
+    "query_length": 8192,
+    "document_length": 8192,
+    "query_prompt": "query: ",
+    "document_prompt": "document: ",
+    "token_k": 32,
+    "head_chunk_size": 2048,
+    "query_budgets": [
+      32,
+      64,
+      128
+    ],
+    "document_budgets": [
+      512,
+      1024
+    ],
+    "temperature": 0.02,
+    "teacher_temperature": 1.0,
+    "kd_weight": 1.0,
+    "balance_weight": 0.01,
+    "query_flops": 0.01,
+    "document_flops": 0.01,
+    "flops_ramp_steps": 3000,
+    "weight_decay": 0.01,
+    "warmup_ratio": 0.05,
+    "lr_scheduler_type": "cosine",
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 1e-08,
+    "optim": "adamw_torch",
+    "gradient_checkpointing": false,
+    "max_grad_norm": 1.0,
+    "seed": 42,
+    "bf16": true,
+    "save_steps": 500,
+    "logging_steps": 1,
+    "save_total_limit": 2
+  }
+}

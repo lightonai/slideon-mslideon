@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slideon-mslideon"
+version = "0.1.0"
+description = "Token-level sparse autoencoder retrieval with SentenceTransformers"
+requires-python = ">=3.11"
+dependencies = [
+  "sentence-transformers>=6.1,<6.2",
+  "transformers>=5.3,<6",
+  "torch>=2.5",
+  "safetensors>=0.4",
+  "huggingface-hub>=0.34",
+  "datasets>=3",
+  "accelerate>=1",
+  "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+eval = ["mteb==2.18.14", "scipy>=1.11"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
