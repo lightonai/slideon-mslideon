@@ -16,6 +16,10 @@ CODE = ("CodeSearchNetCCRetrieval", "COIRCodeSearchNetRetrieval", "CodeFeedbackS
         "SyntheticText2SQL", "CodeFeedbackMT", "CodeEditSearchRetrieval", "StackOverflowQA",
         "CosQA", "AppsRetrieval", "CodeSearchNetRetrieval", "CodeTransOceanContest", "CodeTransOceanDL")
 SUITES = dict(beir=BEIR, miracl=("MIRACLRetrievalHardNegatives",), mldr=("MultiLongDocRetrieval",), code=CODE)
+MTEB_SUITES = {
+    "mteb-eng-v2": "MTEB(eng, v2)",
+    "mteb-multilingual-v2": "MTEB(Multilingual, v2)",
+}
 
 
 def write_json(path, value):
@@ -67,12 +71,12 @@ def exact_dot(queries, documents, top_k, device="cpu", query_batch=64, document_
 
 
 class ExactRetrieval:
-    def __init__(self, model, model_id, revision, output, batch_size=8, query_top_k=0,
-                 document_top_k=0, query_batch=64, document_chunk=16384):
+    def __init__(self, model, model_id, revision, output, batch_size=8, query_max_active_dims=None,
+                 document_max_active_dims=None, query_batch=64, document_chunk=16384):
         from mteb.models.model_meta import ModelMeta, ScoringFunction
         self.model, self.output = model, Path(output)
         self.batch_size = batch_size
-        self.query_top_k, self.document_top_k = query_top_k, document_top_k
+        self.query_max_active_dims, self.document_max_active_dims = query_max_active_dims, document_max_active_dims
         self.query_batch, self.document_chunk = query_batch, document_chunk
         self.mteb_model_meta = ModelMeta.create_empty().model_copy(update=dict(
             name=model_id, revision=revision, similarity_fn_name=ScoringFunction.DOT_PRODUCT, model_type=["sparse"]))
@@ -89,7 +93,7 @@ class ExactRetrieval:
         for batch in loader:
             vectors = getattr(self.model, "encode_" + task)(
                 batch["text"], batch_size=self.batch_size, convert_to_tensor=True,
-                show_progress_bar=False, top_k=self.query_top_k if task == "query" else self.document_top_k)
+                show_progress_bar=False, max_active_dims=self.query_max_active_dims if task == "query" else self.document_max_active_dims)
             if vectors.layout != torch.strided:
                 vectors = vectors.to_dense()
             array = vectors.detach().float().cpu().numpy()
@@ -121,15 +125,18 @@ class ExactRetrieval:
                 for qid, ids, values in zip(queries["id"], indices, scores)}
 
 
-def select_tasks(names, subsets=None, splits=None):
+def select_tasks(names, subsets=None, splits=None, benchmark=None):
     import mteb
-    tasks = list(mteb.get_tasks(tasks=names))
-    if {t.metadata.name for t in tasks} != set(names):
+    tasks = ([task for task in mteb.get_benchmark(benchmark).tasks if task.metadata.type == "Retrieval"]
+             if benchmark else list(mteb.get_tasks(tasks=names)))
+    if not benchmark and {t.metadata.name for t in tasks} != set(names):
         raise ValueError("MTEB did not resolve every requested task")
+    if not tasks:
+        raise ValueError("No retrieval tasks selected")
     for task in tasks:
         if task.metadata.type != "Retrieval":
             raise ValueError(f"Not a retrieval task: {task.metadata.name}")
-        desired = splits or (list(task.metadata.eval_splits) if task.metadata.name in CODE else
+        desired = splits or (list(task.metadata.eval_splits) if benchmark or task.metadata.name in CODE else
                              ["dev"] if task.metadata.name in ("MSMARCO", "MIRACLRetrievalHardNegatives") else ["test"])
         if not set(desired).issubset(task.metadata.eval_splits):
             raise ValueError(f"Invalid splits for {task.metadata.name}: {desired}; available: {task.metadata.eval_splits}")
@@ -141,24 +148,49 @@ def select_tasks(names, subsets=None, splits=None):
     return tasks
 
 
-def summarize(results, tasks, suites):
+def select_suites(suites, subsets=None, splits=None):
+    tasks, members = {}, {}
+    for suite in suites:
+        selected = select_tasks(SUITES.get(suite), subsets, splits, MTEB_SUITES.get(suite))
+        members[suite] = [task.metadata.name for task in selected]
+        for task in selected:
+            name = task.metadata.name
+            if name in tasks and (
+                set(tasks[name].metadata.eval_splits) != set(task.metadata.eval_splits)
+                or set(tasks[name].hf_subsets) != set(task.hf_subsets)
+            ):
+                raise ValueError(f"Suites select different scopes for {name}; run them separately")
+            tasks[name] = task
+    return list(tasks.values()), members
+
+
+def summarize(results, tasks, suite_members):
     by_name = {task.metadata.name: task for task in tasks}
-    scores = {}
+    native_names = {name for suite, names in suite_members.items() if suite in MTEB_SUITES for name in names}
+    metrics = {name: task.metadata.main_score if name in native_names else "ndcg_at_10"
+               for name, task in by_name.items()}
+    scores, ndcg_scores = {}, {}
     for result in results:
         name = result.task_name
         task = by_name[name]
-        values = [row["ndcg_at_10"] for split, rows in result.scores.items() if split in task.metadata.eval_splits
-                  for row in rows if row.get("hf_subset") in task.hf_subsets and "ndcg_at_10" in row]
-        if not values:
-            raise ValueError(f"No nDCG@10 results for {name}")
-        scores[name] = float(np.mean(values))
+        rows = {(split, row.get("hf_subset")): row
+                for split, rows in result.scores.items() for row in rows}
+        expected = [(split, subset) for split in task.metadata.eval_splits for subset in task.hf_subsets]
+        metric = metrics[name]
+        if any(key not in rows or metric not in rows[key] for key in expected):
+            raise ValueError(f"Incomplete {metric} results for {name}")
+        scores[name] = float(np.mean([rows[key][metric] for key in expected]))
+        if all("ndcg_at_10" in rows[key] for key in expected):
+            ndcg_scores[name] = float(np.mean([rows[key]["ndcg_at_10"] for key in expected]))
     averages = {}
-    for suite in suites:
-        members = SUITES[suite]
-        complete = all(name in scores for name in members)
-        averages[suite] = dict(completed=sum(name in scores for name in members), total=len(members),
-                              ndcg_at_10=float(np.mean([scores[name] for name in members])) if complete else None)
-    return dict(metric="ndcg_at_10", scale="0-1", task_scores=scores, suites=averages,
+    for suite, members in suite_members.items():
+        values = scores if suite in MTEB_SUITES else ndcg_scores
+        metric = "main_score" if suite in MTEB_SUITES else "ndcg_at_10"
+        complete = all(name in values for name in members)
+        averages[suite] = dict(completed=sum(name in values for name in members), total=len(members),
+                              **{metric: float(np.mean([values[name] for name in members])) if complete else None})
+    metric = next(iter(set(metrics.values()))) if len(set(metrics.values())) == 1 else "task_specific"
+    return dict(metric=metric, scale="0-1", task_scores=scores, task_metrics=metrics, suites=averages,
                 task_scope={name: dict(splits=list(task.metadata.eval_splits), subsets=list(task.hf_subsets))
                             for name, task in by_name.items()})
 
@@ -169,13 +201,14 @@ def main():
     parser.add_argument("--revision", help="Optional HF commit/tag; resolved commit is recorded")
     parser.add_argument("--trust-remote-code", action="store_true", help="Allow the checkpoint's custom ST adapter")
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--suite", choices=list(SUITES), nargs="+")
+    group.add_argument("--suite", choices=list(SUITES) + list(MTEB_SUITES), nargs="+",
+                       help="Retrieval suites; MTEB v2 suites preserve benchmark splits and subsets")
     group.add_argument("--tasks", nargs="+", help="Explicit MTEB retrieval task names")
     parser.add_argument("--subsets", nargs="+", help="For example: en (must exist in every selected task)")
-    parser.add_argument("--splits", nargs="+", help="Override default test/dev splits")
+    parser.add_argument("--splits", nargs="+", help="Override the selected tasks' evaluation splits")
     parser.add_argument("--output", required=True)
-    parser.add_argument("--query-top-k", type=int, default=0, help="Final vector budget; 0 is unpruned")
-    parser.add_argument("--document-top-k", type=int, default=0)
+    parser.add_argument("--query-max-active-dims", type=int, default=None, help="Positive final vector budget; omit for unpruned")
+    parser.add_argument("--document-max-active-dims", type=int, default=None, help="Positive final vector budget; omit for unpruned")
     parser.add_argument("--batch-size", type=int, default=8, help="Encoder batch size")
     parser.add_argument("--query-batch", type=int, default=64, help="Scoring query block size")
     parser.add_argument("--document-chunk", type=int, default=16384, help="Scoring document block size")
@@ -183,18 +216,23 @@ def main():
     args = parser.parse_args()
     if int(os.environ.get("WORLD_SIZE", "1")) != 1:
         parser.error("Run evaluation with python, not torchrun")
-    if min(args.batch_size, args.query_batch, args.document_chunk) < 1 or min(args.query_top_k, args.document_top_k) < 0:
+    if min(args.batch_size, args.query_batch, args.document_chunk) < 1 or any(
+        cap is not None and cap <= 0 for cap in (args.query_max_active_dims, args.document_max_active_dims)
+    ):
         parser.error("Invalid batch size or pruning budget")
     import mteb
     from huggingface_hub import HfApi
     from mteb.cache import ResultCache
     from sentence_transformers import SparseEncoder
     suites = args.suite or ([] if args.tasks else ["beir"])
-    names = args.tasks or list(dict.fromkeys(name for suite in suites for name in SUITES[suite]))
-    tasks = select_tasks(names, args.subsets, args.splits)
+    if args.tasks:
+        tasks, suite_members = select_tasks(args.tasks, args.subsets, args.splits), {}
+    else:
+        tasks, suite_members = select_suites(suites, args.subsets, args.splits)
     revision = HfApi().model_info(args.model, revision=args.revision).sha
     config = dict(model=args.model, revision=revision, mteb_version=mteb.__version__, score="dot",
-                  query_top_k=args.query_top_k, document_top_k=args.document_top_k, batch_size=args.batch_size,
+                  suites=suite_members,
+                  query_max_active_dims=args.query_max_active_dims, document_max_active_dims=args.document_max_active_dims, batch_size=args.batch_size,
                   tasks={t.metadata.name: dict(splits=list(t.metadata.eval_splits), subsets=list(t.hf_subsets)) for t in tasks})
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
@@ -206,13 +244,17 @@ def main():
     write_json(config_path, config)
     model = SparseEncoder(args.model, revision=revision, trust_remote_code=args.trust_remote_code, device=args.device)
     model.eval()
-    search = ExactRetrieval(model, args.model, revision, output, args.batch_size, args.query_top_k,
-                            args.document_top_k, args.query_batch, args.document_chunk)
+    search = ExactRetrieval(model, args.model, revision, output, args.batch_size, args.query_max_active_dims,
+                            args.document_max_active_dims, args.query_batch, args.document_chunk)
     cache = ResultCache(output / "mteb")
     results = []
     for task in tasks:
         result = mteb.evaluate(search, [task], cache=cache, co2_tracker=False,
                                encode_kwargs={"batch_size": args.batch_size}, raise_error=True)
         results.extend(result.task_results)
-        write_json(output / "summary.json", summarize(results, tasks, suites))
-    print(json.dumps(summarize(results, tasks, suites), indent=2))
+        write_json(output / "summary.json", summarize(results, tasks, suite_members))
+    print(json.dumps(summarize(results, tasks, suite_members), indent=2))
+
+
+if __name__ == "__main__":
+    main()

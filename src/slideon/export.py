@@ -21,6 +21,10 @@ def export_legacy_checkpoint(source, output, sae_checkpoint=None):
     metadata_path = source / "retrieval_config.json"
     metadata = json.loads((metadata_path if metadata_path.exists() else source / "config.json").read_text())
     settings = json.loads((source / "slideon_config.json").read_text())
+    # Translate historical checkpoint metadata; the public API uses max_active_dims.
+    for task in ("query", "document"):
+        legacy_cap = settings.pop(task + "_top_k", None)
+        settings.setdefault(task + "_max_active_dims", legacy_cap or None)
     settings.update(pooling=metadata["pooling"], score=metadata["score"])
     encoder = source / "encoder"
     tokenizer = AutoTokenizer.from_pretrained(encoder, local_files_only=True)

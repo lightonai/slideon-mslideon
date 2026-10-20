@@ -120,21 +120,36 @@ Full reproduction of the released metrics has not been established.
 ```bash
 pip install -e '.[eval]'
 python scripts/eval/evaluate.py --model lightonai/SlideOn --trust-remote-code \
-  --suite beir --query-top-k 32 --document-top-k 512 --output results/slideon
+  --suite beir --query-max-active-dims 32 --document-max-active-dims 512 --output results/slideon
 
 python scripts/eval/evaluate.py --model lightonai/mSlideOn --trust-remote-code \
   --suite beir miracl mldr code --output results/mslideon
+
+python scripts/eval/evaluate.py --model lightonai/SlideOn --trust-remote-code \
+  --suite mteb-eng-v2 --output results/slideon-mteb-eng-v2
+
+python scripts/eval/evaluate.py --model lightonai/mSlideOn --trust-remote-code \
+  --suite mteb-multilingual-v2 --output results/mslideon-mteb-multilingual-v2
 ```
 
-The suites cover BEIR-15, [MIRACL hard negatives](https://huggingface.co/datasets/mteb/miracl-hard-negatives)
+All suites are retrieval only. They cover BEIR-15, [MIRACL hard negatives](https://huggingface.co/datasets/mteb/miracl-hard-negatives)
 (dev), [MLDR](https://huggingface.co/datasets/mteb/MultiLongDocRetrieval) (test), and
-12 code retrieval tasks. Use `--tasks SciFact` for a smaller run or `--subsets en`
+12 code retrieval tasks, plus the retrieval tasks from `MTEB(eng, v2)` (10 tasks)
+and `MTEB(Multilingual, v2)` (18 tasks). The MTEB v2 suites preserve the benchmark's
+evaluation splits and language subsets and exclude the separate `InstructionRetrieval`
+task type. Use `--tasks SciFact` for a smaller run or `--subsets en`
 for the English subsets of MIRACL and MLDR.
 
 Evaluation uses exact dot-product search. Vectors are unpruned by default;
-`--query-top-k` and `--document-top-k` control final pruning. Outputs include MTEB
-results, `summary.json` with nDCG@10 on a 0–1 scale, and `efficiency.json` with
+`--query-max-active-dims` and `--document-max-active-dims` control final pruning. Outputs include MTEB
+results, `summary.json` with scores on a 0–1 scale, and `efficiency.json` with
 average nonzeros and retrieval FLOPS (expected active-latent overlap).
+The existing BEIR, MIRACL, MLDR, and code suites report average nDCG@10. The MTEB v2
+suites average each task's main metric across its selected split/subset pairs,
+then average tasks equally. English v2 uses nDCG@10 throughout; multilingual v2
+also includes nDCG@1 for LEMBPasskeyRetrieval and recall@10 for
+StatcanDialogueDatasetRetrieval. These averages describe the retrieval slices,
+not the full MTEB benchmarks.
 
 Use `--revision` to pin a checkpoint. Lower `--batch-size` for encoder memory or
 `--query-batch` / `--document-chunk` for scoring memory. Corpus vectors stay in
@@ -146,10 +161,16 @@ host RAM. Use a separate output directory for each configuration.
 from sentence_transformers import SparseEncoder
 
 model = SparseEncoder("lightonai/SlideOn", trust_remote_code=True)
-queries = model.encode_query(["What is sparse retrieval?"], top_k=32)
+queries = model.encode_query(["What is sparse retrieval?"], max_active_dims=32)
 documents = model.encode_document(["Sparse retrieval uses inverted indexes."])
 scores = model.similarity(queries, documents)
 ```
+
+Set `max_active_dims=N` to keep the top-N latents with the highest weights in
+each pooled vector and set the rest to zero. Omit it or use `None` for the
+saved unpruned defaults. Positive budgets larger than the embedding dimension
+keep all dimensions. `0` is invalid. `token_k` controls the independent per-token
+activation budget (32 by default).
 
 Use `lightonai/mSlideOn` for multilingual retrieval, or the `final/` directory
 from your own run. Saved models include their backbone, sparse head, tokenizer,

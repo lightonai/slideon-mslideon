@@ -42,7 +42,7 @@ class SlideOnLoss(nn.Module):
         self.step = 0
 
     def forward(self, sentence_features, labels=None):
-        outputs = [self.model(dict(feature), top_k=0) for feature in sentence_features]
+        outputs = [self.model(dict(feature), max_active_dims=None) for feature in sentence_features]
         q = outputs[0]["sentence_embedding"].float()
         docs = torch.cat([item["sentence_embedding"].float() for item in outputs[1:]])
         batch = q.shape[0]
@@ -232,7 +232,7 @@ def main(argv=None):
         model[0].model.backbone.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     settings = model[0].settings
     settings.update(token_k=args.token_k, head_chunk_size=args.head_chunk_size,
-                    query_top_k=0, document_top_k=0,
+                    query_max_active_dims=None, document_max_active_dims=None,
                     prompts={"query": args.query_prompt, "document": args.document_prompt})
     model.prompts = dict(settings["prompts"])
     dimensions = model.get_embedding_dimension()

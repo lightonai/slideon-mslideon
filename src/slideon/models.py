@@ -8,7 +8,7 @@ from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 class SlideOn(InputModule):
     config_file_name = "config.json"
-    forward_kwargs = {"task", "top_k", "token_k"}
+    forward_kwargs = {"task", "max_active_dims", "token_k"}
     save_in_root = True
 
     def __init__(self, checkpoint, model_kwargs=None, processor_kwargs=None,
@@ -75,10 +75,12 @@ class SlideOn(InputModule):
         features["slideon_task"] = task
         return features
 
-    def forward(self, features, task=None, top_k=None, token_k=None, **kwargs):
+    def forward(self, features, task=None, max_active_dims=None, token_k=None, **kwargs):
+        if "top_k" in kwargs:
+            raise TypeError("top_k has been removed; use max_active_dims (None for unpruned)")
         inputs = {key: features[key] for key in
                   ("input_ids", "attention_mask", "token_type_ids", "slideon_task") if key in features}
-        features.update(self.model(**inputs, task=task, top_k=top_k, token_k=token_k))
+        features.update(self.model(**inputs, task=task, max_active_dims=max_active_dims, token_k=token_k))
         return features
 
     def save(self, output_path, safe_serialization=True, **kwargs):

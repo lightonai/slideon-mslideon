@@ -22,7 +22,7 @@ class SlideOnConfig(PretrainedConfig):
         self.projection_configs = projection_configs or []
         self.head_config = head_config or dict(d_model=768, n_latents=32768, d_lift=0)
         self.inference = inference or dict(
-            token_k=32, query_top_k=0, document_top_k=0,
+            token_k=32, query_max_active_dims=None, document_max_active_dims=None,
             query_length=8192, document_length=8192, head_chunk_size=2048,
             prompts={"query": "", "document": ""}, pooling="max_relu", score="dot")
         self.tokenizer_settings = tokenizer_settings or {}
@@ -137,7 +137,9 @@ class SlideOnModel(PreTrainedModel):
 
 
     def forward(self, input_ids, attention_mask, token_type_ids=None, task=None,
-                slideon_task=None, top_k=None, token_k=None, **kwargs):
+                slideon_task=None, max_active_dims=None, token_k=None, **kwargs):
+        if "top_k" in kwargs:
+            raise TypeError("top_k has been removed; use max_active_dims (None for unpruned)")
         features = {"input_ids": input_ids, "attention_mask": attention_mask}
         if slideon_task is not None or task is not None:
             features["slideon_task"] = slideon_task or task
@@ -147,10 +149,10 @@ class SlideOnModel(PreTrainedModel):
         if features.get("slideon_task", task) != task:
             raise ValueError("Preprocessing and forward tasks must match")
         n_latents = self.get_embedding_dimension()
-        cap = self.settings[task + "_top_k"] if top_k is None else top_k
+        cap = self.settings.get(task + "_max_active_dims") if max_active_dims is None else max_active_dims
         k = self.settings["token_k"] if token_k is None else token_k
-        if not isinstance(cap, int) or not 0 <= cap <= n_latents:
-            raise ValueError(f"top_k must be an integer between 0 and {n_latents}")
+        if cap is not None and (type(cap) is not int or cap <= 0):
+            raise ValueError("max_active_dims must be a positive integer or None")
         if not isinstance(k, int) or not 1 <= k <= n_latents:
             raise ValueError(f"token_k must be an integer between 1 and {n_latents}")
         model_inputs = {
@@ -202,8 +204,9 @@ class SlideOnModel(PreTrainedModel):
             pooled.view(mask.shape[0], n_latents)
             * self.head.gate_relu_phi.float().relu()
         )
-        if cap:
-            values, indices = pooled.topk(cap, dim=-1)
+        if cap is not None:
+            # Prune before FP16 rounding
+            values, indices = pooled.topk(min(cap, n_latents), dim=-1)
             pooled = torch.zeros_like(pooled).scatter(1, indices, values)
         # The reference stores retrieval weights in FP16; retain that rounding.
         features["sentence_embedding"] = pooled if self.training else pooled.half().float()

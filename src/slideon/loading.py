@@ -68,7 +68,7 @@ def from_sae(checkpoint, revision=None, backbone_revision=None, query_length=128
         if config.get("backbone_only"):
             encoder_config.update(query_prefix="", document_prefix="", skiplist_words=[])
         (encoder / "config_sentence_transformers.json").write_text(json.dumps(encoder_config))
-        settings = dict(token_k=config["k"], query_top_k=0, document_top_k=0,
+        settings = dict(token_k=config["k"], query_max_active_dims=None, document_max_active_dims=None,
                         query_length=query_length, document_length=document_length,
                         head_chunk_size=256, prompts={
                             "query": config.get("query_prompt", ""),
